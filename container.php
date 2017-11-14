@@ -12,6 +12,9 @@ use Bernard\QueueFactory\PersistentFactory;
 use Building\Domain\Aggregate\Building;
 use Building\Domain\Command;
 use Building\Domain\DomainEvent\CheckInAnomalyDetected;
+use Building\Domain\DomainEvent\NewBuildingWasRegistered;
+use Building\Domain\DomainEvent\UserCheckedIn;
+use Building\Domain\DomainEvent\UserCheckedOut;
 use Building\Domain\Repository\BuildingRepositoryInterface;
 use Building\Infrastructure\Repository\BuildingRepository;
 use Doctrine\DBAL\Connection;
@@ -32,6 +35,7 @@ use Prooph\EventStore\Adapter\PayloadSerializer\JsonPayloadSerializer;
 use Prooph\EventStore\Aggregate\AggregateRepository;
 use Prooph\EventStore\Aggregate\AggregateType;
 use Prooph\EventStore\EventStore;
+use Prooph\EventStore\Stream\StreamName;
 use Prooph\EventStoreBusBridge\EventPublisher;
 use Prooph\EventStoreBusBridge\TransactionManager;
 use Prooph\ServiceBus\Async\MessageProducer;
@@ -239,6 +243,21 @@ return new ServiceManager([
                 },
             ];
         },
+        NewBuildingWasRegistered::class . '-projectors' => function (ContainerInterface $container) : array {
+            return [
+                $container->get('refresh-users'),
+            ];
+        },
+        UserCheckedIn::class . '-projectors' => function (ContainerInterface $container) : array {
+            return [
+                $container->get('refresh-users'),
+            ];
+        },
+        UserCheckedOut::class . '-projectors' => function (ContainerInterface $container) : array {
+            return [
+                $container->get('refresh-users'),
+            ];
+        },
         BuildingRepositoryInterface::class => function (ContainerInterface $container) : BuildingRepositoryInterface {
             return new BuildingRepository(
                 new AggregateRepository(
@@ -247,6 +266,38 @@ return new ServiceManager([
                     new AggregateTranslator()
                 )
             );
+        },
+        'refresh-users' => function (ContainerInterface $container) {
+            $eventStore = $container->get(EventStore::class);
+
+            return function () use ($eventStore) {
+
+                $pastEvents = $eventStore->load(new StreamName('event_stream'));
+
+                /* @var $checkedInUsers null[][] indexed by building id and username */
+                $checkedInUsers = [];
+
+                foreach ($pastEvents->streamEvents() as $pastEvent) {
+                    if ($pastEvent instanceof NewBuildingWasRegistered) {
+                        $checkedInUsers[$pastEvent->aggregateId()] = [];
+                    }
+
+                    if ($pastEvent instanceof UserCheckedIn) {
+                        $checkedInUsers[$pastEvent->buildingId()->toString()][$pastEvent->username()] = null;
+                    }
+
+                    if ($pastEvent instanceof UserCheckedOut) {
+                        unset($checkedInUsers[$pastEvent->buildingId()->toString()][$pastEvent->username()]);
+                    }
+                }
+
+                \array_walk($checkedInUsers, function (array $users, string $aggregateId) {
+                    \file_put_contents(
+                        __DIR__ . '/public/building-' . $aggregateId . '.json',
+                        \json_encode(\array_keys($users))
+                    );
+                });
+            };
         },
     ],
 ]);
